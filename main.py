@@ -50,7 +50,7 @@ def login_to_site(page):
     # Wait for the URL to change indicating successful login
     print("Waiting for login to complete...")
     try:
-        page.wait_for_url('https://app.apollo.io/#/home', timeout=30000)
+        page.wait_for_url('https://app.apollo.io/#/control-center/emails?sortByField=latest_reply_received_at', timeout=30000)
         print("Login successful.")
     except Exception as e:
         print(f"Login failed: {e}")
