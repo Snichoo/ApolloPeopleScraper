@@ -19,12 +19,12 @@ def init_browser(playwright_instance):
     print("Starting browser...")
     if os.path.exists(STORAGE_STATE_PATH):
         print("Storage state file found. Using saved session.")
-        browser = playwright_instance.chromium.launch(headless=False)
+        browser = playwright_instance.chromium.launch(headless=True)
         context = browser.new_context(storage_state=STORAGE_STATE_PATH)
         page = context.new_page()
     else:
         print("No storage state file found. Logging in manually.")
-        browser = playwright_instance.chromium.launch(headless=False)
+        browser = playwright_instance.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
         login_to_site(page)
