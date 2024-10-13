@@ -17,20 +17,43 @@ STORAGE_STATE_PATH = 'apollo_login.json'
 
 def init_browser(playwright_instance):
     print("Starting browser...")
+    # Browser launch options to reduce detection
+    browser = playwright_instance.chromium.launch(
+        headless=True,
+        args=[
+            '--disable-blink-features=AutomationControlled',
+        ]
+    )
+
+    context_options = {
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/94.0.4606.81 Safari/537.36',
+        'viewport': {'width': 1920, 'height': 1080},
+        'accept_downloads': True,
+    }
+
     if os.path.exists(STORAGE_STATE_PATH):
         print("Storage state file found. Using saved session.")
-        browser = playwright_instance.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=STORAGE_STATE_PATH)
+        context_options['storage_state'] = STORAGE_STATE_PATH
+        context = browser.new_context(**context_options)
         page = context.new_page()
     else:
         print("No storage state file found. Logging in manually.")
-        browser = playwright_instance.chromium.launch(headless=True)
-        context = browser.new_context()
+        context = browser.new_context(**context_options)
         page = context.new_page()
         login_to_site(page)
         # Save the authenticated state
         context.storage_state(path=STORAGE_STATE_PATH)
         print(f"Saved storage state to {STORAGE_STATE_PATH}")
+
+    # Add script to remove navigator.webdriver property
+    page.add_init_script("""
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+    });
+    """)
+
     return browser, context, page
 
 def login_to_site(page):
@@ -39,7 +62,7 @@ def login_to_site(page):
 
     # Wait for the login form to be present
     print("Waiting for login form to be present...")
-    page.wait_for_selector("input[name='email']")
+    page.wait_for_selector("input[name='email']", timeout=10000)
 
     print("Filling in email and password...")
     page.fill("input[name='email']", config['email'])
@@ -47,10 +70,11 @@ def login_to_site(page):
     print("Submitting login form...")
     page.click("button[type='submit']")
 
-    # Wait for the URL to change indicating successful login
+    # Wait for the login to complete
     print("Waiting for login to complete...")
     try:
-        page.wait_for_url('https://app.apollo.io/#/control-center/emails?sortByField=latest_reply_received_at', timeout=30000)
+        page.wait_for_function("window.location.href.includes('#/home')", timeout=60000)
+        page.wait_for_load_state('networkidle')
         print("Login successful.")
     except Exception as e:
         print(f"Login failed: {e}")
@@ -59,24 +83,19 @@ def login_to_site(page):
 def scrape_contacts(page, domain_name):
     print("Navigating to the initial page...")
     page.goto('https://app.apollo.io/#/people?page=1&sortAscending=false&sortByField=%5Bnone%5D')
-    page.wait_for_load_state('networkidle')
-    page.wait_for_selector("body")
+
+    # Wait for the page to fully load
+    print("Waiting for page to load...")
+    page.wait_for_load_state('networkidle', timeout=60000)
 
     # Click on "Company" filter
     print("Attempting to click on 'Company' filter...")
     try:
-        company_filter = page.wait_for_selector("//span[text()='Company']", timeout=5000)
+        company_filter = page.wait_for_selector("//span[text()='Company']", timeout=10000)
         company_filter.click()
     except Exception as e:
         print(f"Could not click on 'Company' filter: {e}")
-        # Try again after 1 second
-        page.wait_for_timeout(1000)
-        try:
-            company_filter = page.wait_for_selector("//span[text()='Company']", timeout=5000)
-            company_filter.click()
-        except Exception as e:
-            print(f"Second attempt failed to click on 'Company' filter: {e}")
-            raise Exception("Could not find 'Company' filter element")
+        raise Exception("Could not find 'Company' filter element")
 
     # Find the input field that says 'Enter companies...'
     print("Looking for 'Enter companies...' input field...")
@@ -89,28 +108,21 @@ def scrape_contacts(page, domain_name):
         # Wait for the dropdown options to appear
         print("Waiting for suggestions to appear...")
         suggestion_selector = f"//div[contains(@class, 'Select-option') and contains(., '{domain_name}')]"
-        page.wait_for_selector(suggestion_selector, timeout=5000)
+        page.wait_for_selector(suggestion_selector, timeout=10000)
         # Click on the matching suggestion
         print("Selecting the company from suggestions...")
         page.click(suggestion_selector)
     except Exception as e:
         print(f"Could not select company: {e}")
-        # Try again after 1 second
-        page.wait_for_timeout(1000)
-        try:
-            page.fill("input.Select-input", domain_name)
-            print("Waiting for suggestions to appear...")
-            page.wait_for_selector(suggestion_selector, timeout=5000)
-            print("Selecting the company from suggestions...")
-            page.click(suggestion_selector)
-        except Exception as e:
-            print(f"Second attempt failed to select company: {e}")
-            raise Exception("Could not select the company from suggestions")
+        raise Exception("Could not select the company from suggestions")
 
     # Wait for URL to change and include organizationIds[]
     print("Waiting for URL to include 'organizationIds[]'...")
     try:
-        page.wait_for_url("**organizationIds[]**", timeout=10000)
+        page.wait_for_function(
+            "window.location.href.includes('organizationIds[]')",
+            timeout=10000
+        )
     except Exception as e:
         print(f"URL did not change as expected: {e}")
         raise Exception("URL did not change to include 'organizationIds[]'")
@@ -125,7 +137,7 @@ def scrape_contacts(page, domain_name):
         query_params = parse_qs(parsed_url.query)
     else:
         # Query parameters are in the fragment
-        fragment_parsed = urlparse(parsed_url.fragment)
+        fragment_parsed = urlparse('?' + parsed_url.fragment)
         query_params = parse_qs(fragment_parsed.query)
 
     organization_ids = query_params.get('organizationIds[]', [])
@@ -137,7 +149,11 @@ def scrape_contacts(page, domain_name):
 
     # Now, on the page, scrape each contact's Name, Job Title, LinkedIn, Company Number of Employees
     print("Waiting for contacts to load...")
-    page.wait_for_selector("div[role='rowgroup']")
+    try:
+        page.wait_for_selector("div[role='rowgroup']", timeout=10000)
+    except Exception as e:
+        print(f"Contacts did not load: {e}")
+        raise Exception("Contacts did not load")
 
     print("Scraping contacts...")
     rows = page.query_selector_all("div[role='row'][id^='table-row-']")
@@ -149,7 +165,7 @@ def scrape_contacts(page, domain_name):
         cells = row.query_selector_all("div[role='gridcell']")
 
         # Ensure there are enough cells
-        if len(cells) < 9:
+        if len(cells) < 10:
             continue
 
         # Name
@@ -167,7 +183,7 @@ def scrape_contacts(page, domain_name):
         if linkedin_anchor:
             linkedin_link = linkedin_anchor.get_attribute("href")
 
-        # Company Number of Employees (assuming it's in cell[8])
+        # Company Number of Employees (assuming it's in cell[9])
         number_of_employees_cell = cells[9]
         number_of_employees = number_of_employees_cell.inner_text().strip()
 
